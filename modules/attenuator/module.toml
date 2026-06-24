@@ -1,0 +1,49 @@
+# Passive attenuator -- the first-slice module.
+#
+# Topology (a potentiometer wired as a variable voltage divider):
+#   input jack TIP --> pot pin 1 (CW)
+#   pot wiper (2)   --> output jack TIP
+#   pot pin 3 (CCW) --> GND   (and both jack sleeves)
+#
+# Output = input * wiper_fraction. Deliberately trivial: the point of slice 1
+# is the toolchain, not the circuit.
+
+[module]
+name = "attenuator"
+title = "ATTEN"
+hp = 4
+description = "Passive single-channel attenuator (one pot, two jacks)."
+
+[[components]]
+ref = "J1"
+type = "jack_35"
+role = "input"
+x = 10.16
+y = 24.0
+
+[[components]]
+ref = "RV1"
+type = "pot_9mm"
+role = "level"
+value = "100k"
+x = 10.16
+y = 64.0
+
+[[components]]
+ref = "J2"
+type = "jack_35"
+role = "output"
+x = 10.16
+y = 104.0
+
+[[nets]]
+name = "IN"
+connect = ["J1.TIP", "RV1.1"]
+
+[[nets]]
+name = "OUT"
+connect = ["RV1.2", "J2.TIP"]
+
+[[nets]]
+name = "GND"
+connect = ["RV1.3", "J1.SLEEVE", "J2.SLEEVE"]

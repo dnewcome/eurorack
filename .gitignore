@@ -1,0 +1,16 @@
+# build artifacts
+build/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# editor / local tooling config
+.claude/
+
+# kicad backups
+*-backups/
+*.kicad_pcb-bak
+fp-info-cache
