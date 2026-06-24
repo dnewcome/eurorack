@@ -29,5 +29,5 @@ Built and verified end-to-end (`python3 build.py modules/attenuator/module.toml`
 | Leg | Tool | Output | Verified |
 |-----|------|--------|----------|
 | Simulate | ngspice | AC transfer vs wiper | matches ideal divider to 1e-8 |
-| PCB | pcbnew + kicad-cli | `.kicad_pcb`, Gerbers, drill, SVG | 3 footprints, 3 nets, 4 tracks, 4HP outline |
+| PCB | pcbnew + kicad-cli | `.kicad_pcb`, Gerbers, drill, SVG | maze-routed, **0 DRC errors/warnings**, 4HP outline |
 | Mechanical | build123d | panel STL/DXF/SVG, silk SVG, standoff STL | watertight solids, correct 20.02×128.5 mm, cutouts 6/6/7 mm |

@@ -19,8 +19,9 @@ faceplate out the other end.
         │                   │                   │
      ngspice         pcbnew + kicad-cli      build123d
         │                   │                   │
-   AC transfer /     .kicad_pcb, Gerbers,   panel STL/DXF/SVG,
-   sanity sim        drill, SVG preview     silkscreen, PCB mount
+   AC transfer /     route + DRC-gated      panel STL/DXF/SVG,
+   sanity sim        .kicad_pcb, Gerbers,   silkscreen, PCB mount
+                     drill, SVG preview
                             │                   │
                             └──────► PCBWay / your laser + printer
 ```
@@ -148,7 +149,7 @@ toolkit/
   spec.py    load + validate module.toml → dataclasses (shared interchange)
   parts.py   part registry (footprint / pins / cutout / sim model)
   sim.py     ngspice netlister + runner
-  pcb.py     pcbnew board generation + kicad-cli fab export
+  pcb.py     pcbnew board gen + maze router + DRC gate + kicad-cli export
   panel.py   build123d faceplate + PCB standoff
   _env.py    makes pcbnew importable alongside the rest
 modules/
@@ -166,7 +167,7 @@ BRIEF.md     kickoff brief + first-slice status
 | Leg | Result |
 |-----|--------|
 | Simulate | AC transfer matches ideal divider to **1e-8** |
-| PCB | 3 footprints, 3 nets, 4 tracks, correct 4HP/3U outline; Gerbers + drill emitted |
+| PCB | 3 nets fully routed, **0 DRC errors / 0 warnings**, correct 4HP/3U outline; Gerbers + drill emitted |
 | Mechanical | watertight panel STL (20.02 × 128.5 × 2 mm), DXF cut profile, silkscreen, standoff |
 
 **Next frontiers** (deliberately out of scope for slice 1):
@@ -175,7 +176,8 @@ BRIEF.md     kickoff brief + first-slice status
   sim leg handles passive R-networks + potentiometers.
 - Real **Thonkiconn** footprints (currently a CUI 3.5 mm stand-in — one string
   to swap in `parts.py`).
-- **DRC** in the PCB leg and smarter routing (today: naive straight tracks).
+- A **ground pour** (the KiCad scripted filler won't clear bare NPTH mounting
+  holes, so GND is currently maze-routed as tracks rather than a copper zone).
 - A richer **PCB carrier/mount** beyond the single standoff primitive.
 - A growing **parts + module library**.
 

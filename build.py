@@ -28,12 +28,15 @@ def main(spec_path: str) -> None:
     ok = res.max_error < 1e-3
     print(f"  -> {'PASS' if ok else 'CHECK'}: divider transfer matches ideal\n")
 
-    # 2. PCB + fab export
+    # 2. PCB + fab export (DRC-gated)
     print("[2/3] PCB (pcbnew + kicad-cli)")
     arts = pcb.generate(mod, out / "pcb")
+    drc = arts.pop("drc")
     for k, v in arts.items():
         print(f"  {k}: {v}")
-    print()
+    print(f"  DRC: {drc.errors} errors, {drc.warnings} warnings"
+          f"{' ' + str(dict(drc.by_type)) if drc.by_type else ''}")
+    print(f"  -> {'PASS' if drc.clean else 'FAIL'}: design-rule check\n")
 
     # 3. mechanical
     print("[3/3] mechanical (build123d)")
