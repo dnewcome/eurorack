@@ -28,7 +28,8 @@ class Component:
     x: float          # panel position, mm from top-left
     y: float
     role: str = ""    # "input" / "output" / "" -- used by the sim leg
-    value: str = ""   # e.g. "100k" (pots/resistors)
+    value: str = ""   # e.g. "100k" (pots/resistors), "1n" (caps)
+    wiper: float = 0.5  # pot wiper position 0..1, for simulation
 
     @property
     def part(self) -> Part:
@@ -58,6 +59,25 @@ class Net:
 
 
 @dataclass
+class SimConfig:
+    """Optional [sim] block: how to analyse the module.
+
+    If absent, the sim leg falls back to its passive-AC divider analysis
+    (used by the attenuator).
+    """
+    analysis: str = "ac"            # "ac" | "tran"
+    tstep: str = "5us"
+    tstop: str = "20ms"
+    uic: bool = True
+    ic: dict[str, float] = field(default_factory=dict)        # net -> volts
+    probes: list[str] = field(default_factory=list)           # nets to record
+    stimulus: dict[str, float] = field(default_factory=dict)  # net -> DC volts
+    measure_net: str = ""           # net whose frequency we report
+    sweep_net: str = ""             # net swept for a characterisation
+    sweep_values: list[float] = field(default_factory=list)
+
+
+@dataclass
 class Module:
     name: str
     title: str
@@ -65,6 +85,8 @@ class Module:
     description: str = ""
     components: list[Component] = field(default_factory=list)
     nets: list[Net] = field(default_factory=list)
+    supplies: dict[str, float] = field(default_factory=dict)  # net -> volts
+    sim: SimConfig | None = None
 
     # --- geometry -----------------------------------------------------------
     @property
@@ -115,6 +137,7 @@ def load(path: str | Path) -> Module:
             y=float(c["y"]),
             role=c.get("role", ""),
             value=c.get("value", ""),
+            wiper=float(c.get("wiper", 0.5)),
         )
         for c in data.get("components", [])
     ]
@@ -122,6 +145,25 @@ def load(path: str | Path) -> Module:
         Net(name=n["name"], pins=[PinRef.parse(t) for t in n["connect"]])
         for n in data.get("nets", [])
     ]
+    supplies = {k: float(v) for k, v in data.get("supplies", {}).items()}
+
+    sim = None
+    if "sim" in data:
+        s = data["sim"]
+        sw = s.get("sweep", {})
+        sim = SimConfig(
+            analysis=s.get("analysis", "ac"),
+            tstep=s.get("tstep", "5us"),
+            tstop=s.get("tstop", "20ms"),
+            uic=s.get("uic", True),
+            ic={k: float(v) for k, v in s.get("ic", {}).items()},
+            probes=list(s.get("probes", [])),
+            stimulus={k: float(v) for k, v in s.get("stimulus", {}).items()},
+            measure_net=s.get("measure", {}).get("net", ""),
+            sweep_net=sw.get("net", ""),
+            sweep_values=[float(v) for v in sw.get("values", [])],
+        )
+
     mod = Module(
         name=m["name"],
         title=m.get("title", m["name"]),
@@ -129,6 +171,8 @@ def load(path: str | Path) -> Module:
         description=m.get("description", ""),
         components=components,
         nets=nets,
+        supplies=supplies,
+        sim=sim,
     )
     _validate(mod)
     return mod

@@ -23,10 +23,9 @@ def main(spec_path: str) -> None:
 
     # 1. simulate
     print("[1/3] simulate (ngspice)")
-    res = sim.simulate(mod)
-    print(sim.report(res))
-    ok = res.max_error < 1e-3
-    print(f"  -> {'PASS' if ok else 'CHECK'}: divider transfer matches ideal\n")
+    text, ok = sim.analyze(mod)
+    print(text)
+    print(f"  -> {'PASS' if ok else 'CHECK'}\n")
 
     # 2. PCB + fab export (DRC-gated)
     print("[2/3] PCB (pcbnew + kicad-cli)")

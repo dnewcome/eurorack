@@ -1,0 +1,216 @@
+# Linear VCO -- op-amp/OTA triangle+square relaxation core.
+#
+# Core (proven in sim, R^2=0.9999 linear f-vs-CV):
+#   OTA (U1) is a current source whose magnitude = I_abc and whose sign is
+#   steered by the square wave -> charges C1 -> triangle. U2A buffers the
+#   triangle; U2B is a Schmitt comparator -> square, which steers the OTA.
+#   I_abc (hence frequency) is set by TUNE + CV summed as currents into the
+#   OTA bias pin. Linear CV now; a 1V/oct expo converter feeding I_abc is the
+#   documented next step.
+
+[module]
+name = "vco"
+title = "VCO"
+hp = 8
+description = "Linear triangle/square VCO (LM13700 OTA core + TL072)."
+
+# ---- panel-mounted controls (panel_d > 0 -> get faceplate cutouts) ----
+[[components]]
+ref = "RV1"
+type = "pot_9mm"
+value = "100k"
+role = "tune"
+wiper = 0.5
+x = 20.17
+y = 22.0
+
+[[components]]
+ref = "J1"
+type = "jack_35"
+role = "input"
+x = 20.17
+y = 52.0
+
+[[components]]
+ref = "J2"
+type = "jack_35"
+role = "output"
+x = 20.17
+y = 80.0
+
+[[components]]
+ref = "J3"
+type = "jack_35"
+role = "output"
+x = 20.17
+y = 105.0
+
+# ---- board-only: ICs ----
+[[components]]
+ref = "U1"
+type = "lm13700"
+x = 10.0
+y = 72.0
+
+[[components]]
+ref = "U2"
+type = "tl072"
+x = 10.0
+y = 40.0
+
+[[components]]
+ref = "P1"
+type = "power_2x5"
+x = 31.0
+y = 100.0
+
+# ---- board-only: passives ----
+[[components]]
+ref = "C1"
+type = "cap_film"
+value = "1n"
+x = 18.0
+y = 60.0
+
+[[components]]
+ref = "R1"
+type = "resistor"
+value = "10k"
+x = 30.0
+y = 30.0
+
+[[components]]
+ref = "R2"
+type = "resistor"
+value = "100k"
+x = 30.0
+y = 38.0
+
+[[components]]
+ref = "R3"
+type = "resistor"
+value = "100k"
+x = 30.0
+y = 46.0
+
+[[components]]
+ref = "R4"
+type = "resistor"
+value = "5k1"
+x = 30.0
+y = 54.0
+
+[[components]]
+ref = "R5"
+type = "resistor"
+value = "10meg"
+x = 32.0
+y = 62.0
+
+[[components]]
+ref = "R6"
+type = "resistor"
+value = "10meg"
+x = 32.0
+y = 70.0
+
+[[components]]
+ref = "R7"
+type = "resistor"
+value = "1k"
+x = 8.0
+y = 92.0
+
+[[components]]
+ref = "R8"
+type = "resistor"
+value = "1k"
+x = 8.0
+y = 100.0
+
+# ---------------------------------------------------------------------------
+# nets
+# ---------------------------------------------------------------------------
+[[nets]]
+name = "VCC"
+connect = ["U1.V+", "U2.V+", "RV1.1", "P1.V+"]
+
+[[nets]]
+name = "VEE"
+connect = ["U1.V-", "U2.V-", "P1.V-"]
+
+[[nets]]
+name = "GND"
+connect = ["C1.2", "R4.2", "U2.IN2-", "U1.+IN1", "RV1.3",
+           "J1.SLEEVE", "J2.SLEEVE", "J3.SLEEVE", "P1.GND"]
+
+# OTA output / timing-cap node -> triangle source
+[[nets]]
+name = "ITRI"
+connect = ["U1.OUT1", "C1.1", "U2.IN1+"]
+
+# buffered triangle
+[[nets]]
+name = "TRI"
+connect = ["U2.OUT1", "U2.IN1-", "R1.1", "R7.1"]
+
+# square (comparator output)
+[[nets]]
+name = "SQ"
+connect = ["U2.OUT2", "R2.1", "R3.1", "R8.1"]
+
+# comparator summing node (Schmitt hysteresis)
+[[nets]]
+name = "CMPP"
+connect = ["R1.2", "R2.2", "U2.IN2+"]
+
+# divided square into the OTA steering input
+[[nets]]
+name = "OTAIN"
+connect = ["R3.2", "R4.1", "U1.-IN1"]
+
+# OTA bias current node (TUNE + CV summed here)
+[[nets]]
+name = "IABC"
+connect = ["U1.IABC1", "R5.2", "R6.2"]
+
+[[nets]]
+name = "TUNE"
+connect = ["RV1.2", "R5.1"]
+
+[[nets]]
+name = "CV"
+connect = ["J1.TIP", "R6.1"]
+
+[[nets]]
+name = "TRIOUT"
+connect = ["R7.2", "J2.TIP"]
+
+[[nets]]
+name = "SQOUT"
+connect = ["R8.2", "J3.TIP"]
+
+# ---------------------------------------------------------------------------
+# supplies + simulation
+# ---------------------------------------------------------------------------
+[supplies]
+VCC = 12
+VEE = -12
+
+[sim]
+analysis = "tran"
+tstep = "2us"
+tstop = "20ms"
+uic = true
+probes = ["TRI", "SQ"]
+ic = { ITRI = 0.5 }
+
+[sim.measure]
+net = "TRI"
+
+[sim.stimulus]
+CV = 0.0
+
+[sim.sweep]
+net = "CV"
+values = [-5.0, -2.5, 0.0, 2.5, 5.0]
