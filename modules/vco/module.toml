@@ -14,6 +14,9 @@ title = "VCO"
 hp = 12
 description = "Linear triangle/square VCO (LM13700 OTA core + TL072)."
 
+[pcb]
+router = "freerouting"   # dense board -> hand off to the freerouting CLI
+
 # ---- panel-mounted controls (panel_d > 0 -> get faceplate cutouts) ----
 [[components]]
 ref = "RV1"
@@ -21,112 +24,112 @@ type = "pot_9mm"
 value = "100k"
 role = "tune"
 wiper = 0.5
-x = 8.0
-y = 22.0
+x = 9.0
+y = 18.0
 
 [[components]]
 ref = "J1"
 type = "jack_35"
 role = "input"
-x = 8.0
-y = 52.0
+x = 9.0
+y = 44.0
 
 [[components]]
 ref = "J2"
 type = "jack_35"
 role = "output"
-x = 8.0
-y = 80.0
+x = 9.0
+y = 72.0
 
 [[components]]
 ref = "J3"
 type = "jack_35"
 role = "output"
-x = 8.0
-y = 106.0
+x = 9.0
+y = 100.0
 
 # ---- board-only: ICs ----
 [[components]]
 ref = "U1"
 type = "lm13700"
 x = 28.0
-y = 70.0
+y = 56.0
 
 [[components]]
 ref = "U2"
 type = "tl072"
 x = 28.0
-y = 32.0
+y = 20.0
 
 [[components]]
 ref = "P1"
 type = "power_2x5"
-x = 46.0
-y = 100.0
+x = 28.0
+y = 92.0
 
 # ---- board-only: passives ----
 [[components]]
 ref = "C1"
 type = "cap_film"
 value = "1n"
-x = 41.0
+x = 45.0
 y = 52.0
 
 [[components]]
 ref = "R1"
 type = "resistor"
 value = "10k"
-x = 35.0
-y = 30.0
+x = 39.0
+y = 18.0
 
 [[components]]
 ref = "R2"
 type = "resistor"
 value = "100k"
-x = 38.0
-y = 30.0
+x = 45.0
+y = 18.0
 
 [[components]]
 ref = "R3"
 type = "resistor"
 value = "100k"
-x = 35.0
-y = 40.0
+x = 51.0
+y = 18.0
 
 [[components]]
 ref = "R4"
 type = "resistor"
 value = "5k1"
-x = 38.0
-y = 40.0
+x = 39.0
+y = 30.0
 
 [[components]]
 ref = "R5"
 type = "resistor"
 value = "10meg"
-x = 18.0
-y = 62.0
+x = 45.0
+y = 30.0
 
 [[components]]
 ref = "R6"
 type = "resistor"
 value = "10meg"
-x = 18.0
-y = 68.0
+x = 51.0
+y = 30.0
 
 [[components]]
 ref = "R7"
 type = "resistor"
 value = "1k"
-x = 35.0
-y = 48.0
+x = 39.0
+y = 64.0
 
 [[components]]
 ref = "R8"
 type = "resistor"
 value = "1k"
-x = 38.0
-y = 48.0
+x = 45.0
+y = 64.0
 
 # ---------------------------------------------------------------------------
 # nets

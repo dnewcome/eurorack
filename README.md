@@ -134,6 +134,7 @@ max error vs ideal divider: 1.00e-08
 | **ngspice** | `apt install ngspice` | sim leg |
 | **KiCad 9** | provides `kicad-cli` + `pcbnew` Python module | PCB leg |
 | **build123d** | `pip install build123d` | mechanical leg |
+| **freerouting** | `freert` on PATH (+ Java) | autorouting dense boards (`router = "freerouting"`); not needed for the built-in maze router |
 
 KiCad's `pcbnew` module lives in the system `dist-packages` dir.
 `toolkit/_env.py` *appends* it to `sys.path` (not inserts — so the toolchain's
@@ -146,39 +147,45 @@ interpreter.
 
 ```
 toolkit/
-  spec.py    load + validate module.toml → dataclasses (shared interchange)
-  parts.py   part registry (footprint / pins / cutout / sim model)
-  sim.py     ngspice netlister + runner
-  pcb.py     pcbnew board gen + maze router + DRC gate + kicad-cli export
-  panel.py   build123d faceplate + PCB standoff
-  _env.py    makes pcbnew importable alongside the rest
+  spec.py        load + validate module.toml → dataclasses (shared interchange)
+  parts.py       part registry (footprint / pins / cutout / sim model)
+  sim.py         ngspice netlister (AC + transient) + runner
+  pcb.py         pcbnew board gen + router (maze | freerouting) + DRC + export
+  panel.py       build123d faceplate + PCB standoff
+  models.spice   behavioral op-amp / OTA / TL072 / LM13700 subckts
+  _env.py        makes pcbnew importable alongside the rest
 modules/
-  attenuator/module.toml
-build.py     end-to-end driver
-BRIEF.md     kickoff brief + first-slice status
+  attenuator/module.toml   passive attenuator (AC sim, maze router)
+  vco/module.toml          linear VCO (transient sim, freerouting)
+build.py         end-to-end driver
+docs/AUTOROUTING.md  how the autorouting actually works (read this)
+BRIEF.md         kickoff brief + first-slice status
 ```
 
 ---
 
 ## Status & roadmap
 
-**First slice — passive attenuator — done and verified end-to-end:**
+**Two modules build end-to-end and DRC-clean:**
 
-| Leg | Result |
-|-----|--------|
-| Simulate | AC transfer matches ideal divider to **1e-8** |
-| PCB | 3 nets fully routed, **0 DRC errors / 0 warnings**, correct 4HP/3U outline; Gerbers + drill emitted |
-| Mechanical | watertight panel STL (20.02 × 128.5 × 2 mm), DXF cut profile, silkscreen, standoff |
+| Module | Sim | PCB | Mechanical |
+|--------|-----|-----|------------|
+| **attenuator** (4HP) | AC transfer matches ideal divider to **1e-8** | maze router, **0 DRC errors**, GND pour | panel STL/DXF/silk, standoff |
+| **vco** (12HP) | transient: oscillates, **f = 23.5·CV + 644 Hz, R²=0.99998** | freerouting, **0 DRC errors**, 16 parts / 2 ICs, dual GND pour | panel STL/DXF/silk, standoff |
 
-**Next frontiers** (deliberately out of scope for slice 1):
+The VCO is a linear triangle/square oscillator (LM13700 OTA core + TL072). Both
+the active-device transient sim and the dense 2-layer autoroute are real — see
+`docs/AUTOROUTING.md` for how the freerouting flow was made to work.
 
-- Generic netlisting for **active circuits** (op-amps, transistors) — today the
-  sim leg handles passive R-networks + potentiometers.
+**Next frontiers:**
+
+- **1V/oct expo converter** feeding the OTA bias current (the VCO is linear-CV
+  today; the expo stage is the documented next step).
 - Real **Thonkiconn** footprints (currently a CUI 3.5 mm stand-in — one string
   to swap in `parts.py`).
-- A **ground pour** (the KiCad scripted filler won't clear bare NPTH mounting
-  holes, so GND is currently maze-routed as tracks rather than a copper zone).
-- A richer **PCB carrier/mount** beyond the single standoff primitive.
+- **Auto-placement** — routing is solved, but component placement is still hand-
+  tuned per module; an auto-placer would close the loop.
+- Vendor-accurate IC SPICE models (today the op-amp/OTA are behavioral).
 - A growing **parts + module library**.
 
 See `BRIEF.md` for the scoping decisions behind all of this.

@@ -225,7 +225,7 @@ def _add_pour(board, net, layer, x0, y0, x1, y1):
     z.SetLayer(layer)
     z.SetNetCode(net.GetNetCode())
     z.SetLocalClearance(_mm(CLEARANCE + 0.05))
-    z.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
+    z.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)  # solid; avoids starved thermals
     i = EDGE_CLEAR
     z.AddPolygon(_poly(board, [(x0+i, y0+i), (x1-i, y0+i),
                                (x1-i, y1-i), (x0+i, y1-i)]))
@@ -345,6 +345,27 @@ def _route_signals(board, mod, x0, y0, x1, y1):
     return failed
 
 
+def _route_freerouting(board, out_path: Path) -> None:
+    """Route signals with the freerouting CLI via the Specctra DSN/SES bridge.
+
+    GND is already a poured plane, so freerouting only routes the signal nets.
+    """
+    if shutil.which("freert") is None:
+        raise RuntimeError("freert (freerouting) not found on PATH")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    dsn = out_path.with_suffix(".dsn")
+    ses = out_path.with_suffix(".ses")
+    if not pcbnew.ExportSpecctraDSN(board, str(dsn)):
+        raise RuntimeError("ExportSpecctraDSN failed")
+    proc = subprocess.run(["freert", "-de", str(dsn), "-do", str(ses)],
+                          capture_output=True, text=True, timeout=600)
+    if not ses.exists():
+        raise RuntimeError(
+            f"freerouting produced no session\n{proc.stdout}\n{proc.stderr}")
+    if not pcbnew.ImportSpecctraSES(board, str(ses)):
+        raise RuntimeError("ImportSpecctraSES failed")
+
+
 def build_board(mod: Module, out_path: Path) -> Path:
     board = pcbnew.NewBoard(str(out_path))
     ds = board.GetDesignSettings()
@@ -384,15 +405,24 @@ def build_board(mod: Module, out_path: Path) -> Path:
     x1, y1 = cx1 + BOARD_MARGIN, cy1 + BOARD_MARGIN
     _draw_outline(board, x0, y0, x1, y1)
 
-    failed = _route_signals(board, mod, x0, y0, x1, y1)
-    if failed:
-        raise RuntimeError(f"router failed to connect nets: {failed}")
-
-    # GND as two poured planes; keepouts clear the mounting holes
-    if GND_NET in nets:
+    # GND as two poured planes (keepouts clear the mounting holes), filled
+    # before routing so freerouting sees GND as a plane and skips it.
+    has_gnd = GND_NET in nets
+    if has_gnd:
         _add_npth_keepouts(board)
         _add_pour(board, nets[GND_NET], pcbnew.F_Cu, x0, y0, x1, y1)
         _add_pour(board, nets[GND_NET], pcbnew.B_Cu, x0, y0, x1, y1)
+        pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+
+    # route the signal nets
+    if mod.pcb_router == "freerouting":
+        _route_freerouting(board, out_path)
+    else:
+        failed = _route_signals(board, mod, x0, y0, x1, y1)
+        if failed:
+            raise RuntimeError(f"router failed to connect nets: {failed}")
+
+    if has_gnd:  # refill the planes around the new traces
         pcbnew.ZONE_FILLER(board).Fill(board.Zones())
 
     text = pcbnew.PCB_TEXT(board)

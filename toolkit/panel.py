@@ -52,6 +52,8 @@ def _cut_profile(mod):
         Rectangle(mod.panel_w, mod.panel_h)
         # component cutouts
         for c in mod.components:
+            if c.part.panel_d <= 0:      # board-only part, no panel cutout
+                continue
             with Locations(_to_sketch(mod, c.x, c.y)):
                 Circle(c.part.panel_d / 2, mode=Mode.SUBTRACT)
         # mounting slots
@@ -66,6 +68,8 @@ def build_panel(mod):
         with BuildSketch():
             Rectangle(mod.panel_w, mod.panel_h)
             for c in mod.components:
+                if c.part.panel_d <= 0:      # board-only part, no panel cutout
+                    continue
                 with Locations(_to_sketch(mod, c.x, c.y)):
                     Circle(c.part.panel_d / 2, mode=Mode.SUBTRACT)
             for (sx, sy) in _mount_slots(mod):
@@ -93,6 +97,8 @@ def _silk_sketch(mod):
             Text(mod.title, font_size=4.0)
     shapes.append(title.sketch)
     for c in mod.components:
+        if c.part.panel_d <= 0:      # board-only part, no panel label
+            continue
         with BuildSketch() as lbl:
             lx, ly = _to_sketch(mod, c.x, c.y + c.part.panel_d / 2 + 3.5)
             with Locations((lx, ly)):

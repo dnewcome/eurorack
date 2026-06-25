@@ -59,6 +59,7 @@ check: ## Verify the toolchain dependencies are installed
 	@command -v ngspice    >/dev/null && echo "  ngspice    ok" || echo "  ngspice    MISSING (apt install ngspice)"
 	@command -v kicad-cli  >/dev/null && echo "  kicad-cli  ok" || echo "  kicad-cli  MISSING (install KiCad 9)"
 	@command -v zip        >/dev/null && echo "  zip        ok" || echo "  zip        missing (fab zip falls back to python)"
+	@command -v freert     >/dev/null && echo "  freert     ok" || echo "  freert     missing (only needed for router=freerouting)"
 	@$(PY) -c "import toolkit, pcbnew" 2>/dev/null && echo "  pcbnew     ok" || echo "  pcbnew     MISSING (KiCad python module)"
 	@$(PY) -c "import build123d"       2>/dev/null && echo "  build123d  ok" || echo "  build123d  MISSING (pip install build123d)"
 

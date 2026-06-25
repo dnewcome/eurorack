@@ -88,6 +88,7 @@ class Module:
     nets: list[Net] = field(default_factory=list)
     supplies: dict[str, float] = field(default_factory=dict)  # net -> volts
     sim: SimConfig | None = None
+    pcb_router: str = "maze"   # "maze" (built-in) | "freerouting"
 
     # --- geometry -----------------------------------------------------------
     @property
@@ -175,6 +176,7 @@ def load(path: str | Path) -> Module:
         nets=nets,
         supplies=supplies,
         sim=sim,
+        pcb_router=data.get("pcb", {}).get("router", "maze"),
     )
     _validate(mod)
     return mod

@@ -106,7 +106,7 @@ PARTS: dict[str, Part] = {
     #     pin 1 = -12V (red stripe), pins 4/5/6 = GND, pin 10 = +12V. ---
     "power_2x5": Part(
         type="power_2x5",
-        footprint="Connector_IDC:IDC-Header_2x05_P2.54mm_Latch_Vertical",
+        footprint="Connector_PinHeader_2.54mm:PinHeader_2x05_P2.54mm_Vertical",
         pins=_ic_pins(10, {"V-": 1, "GND": 4, "V+": 10}),
         panel_d=0.0,
         sim="passthrough",
