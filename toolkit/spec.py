@@ -30,6 +30,7 @@ class Component:
     role: str = ""    # "input" / "output" / "" -- used by the sim leg
     value: str = ""   # e.g. "100k" (pots/resistors), "1n" (caps)
     wiper: float = 0.5  # pot wiper position 0..1, for simulation
+    rotation: float = 0.0  # footprint rotation in degrees (PCB placement)
 
     @property
     def part(self) -> Part:
@@ -138,6 +139,7 @@ def load(path: str | Path) -> Module:
             role=c.get("role", ""),
             value=c.get("value", ""),
             wiper=float(c.get("wiper", 0.5)),
+            rotation=float(c.get("rotation", 0.0)),
         )
         for c in data.get("components", [])
     ]

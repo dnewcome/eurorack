@@ -1,27 +1,24 @@
 """PCB leg: shared spec -> pcbnew board -> DRC -> kicad-cli fab export.
 
-Builds a `.kicad_pcb` directly with the KiCad Python API, then runs KiCad's own
-design-rule check before exporting fab files. Routing is real, not cosmetic:
+Builds a `.kicad_pcb` with the KiCad Python API and a small 2-layer autorouter,
+then gates fab export on KiCad's own DRC.
 
-  - footprints are placed at each component's panel (x, y)
-  - footprint-owned Edge.Cuts (panel-mount slots) and overhanging silk are
-    stripped so they don't corrupt the board outline / silk clearance
-  - the board outline is sized to the copper, inset-clear of every part
-  - GND is a poured copper zone (B.Cu) -- the realistic way to handle ground and
-    the thing that kills almost all the track crossings/shorts
-  - signal nets are routed on F.Cu by a small grid maze-router that threads the
-    gaps between pads and mounting holes
-  - the title goes on the front silkscreen
-
-`generate()` fails loud if DRC reports errors, so a board that ships is a board
-that passed.
+Approach:
+  - place footprints at each component's (x, y); re-layer footprint-owned
+    Edge.Cuts / overhanging silk to Dwgs.User; hide fields (panel labels parts)
+  - size the board outline to the copper, clear of every part
+  - GND is two poured copper zones (F.Cu + B.Cu); NPTH mounting holes get
+    keepout rule-areas so the filler clears them (the filler won't on its own)
+  - every other net is routed by a Dijkstra maze-router over a 2-layer grid;
+    nets cross by switching layers through vias
+  - export only if DRC is clean (generate() raises otherwise)
 """
 from __future__ import annotations
 
+import heapq
 import json
 import shutil
 import subprocess
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,17 +28,18 @@ import pcbnew
 from .spec import Module
 
 FOOTPRINT_ROOT = Path("/usr/share/kicad/footprints")
-TRACK_WIDTH = 0.4       # mm
-CLEARANCE = 0.25        # mm copper-copper
+TRACK_WIDTH = 0.3       # mm
+CLEARANCE = 0.2         # mm copper-copper
 EDGE_CLEAR = 0.5        # mm copper-to-edge
-BOARD_MARGIN = 2.5      # mm from outermost copper to board edge
-GRID = 0.4              # mm maze-router grid
+BOARD_MARGIN = 3.0      # mm copper bbox -> board edge
+GRID = 0.3              # mm maze-router grid
+VIA_DIA = 0.8
+VIA_DRILL = 0.4
+VIA_COST = 12           # grid-steps penalty per layer change
 GND_NET = "GND"
+LAYERS = (pcbnew.F_Cu, pcbnew.B_Cu)   # index 0 = front, 1 = back
 
 
-# --------------------------------------------------------------------------- #
-# units
-# --------------------------------------------------------------------------- #
 def _mm(v: float) -> int:
     return pcbnew.FromMM(v)
 
@@ -56,18 +54,16 @@ def _pos_mm(item) -> tuple[float, float]:
 
 
 # --------------------------------------------------------------------------- #
-# maze router
+# 2-layer maze router
 # --------------------------------------------------------------------------- #
 class _Grid:
-    """4-connected occupancy grid over the board interior, in mm."""
-
     def __init__(self, x0, y0, x1, y1):
         self.x0, self.y0 = x0, y0
         self.nx = int((x1 - x0) / GRID) + 1
         self.ny = int((y1 - y0) / GRID) + 1
-        self.blocked = bytearray(self.nx * self.ny)
+        self.blk = [bytearray(self.nx * self.ny), bytearray(self.nx * self.ny)]
 
-    def _idx(self, i, j):
+    def _i(self, i, j):
         return j * self.nx + i
 
     def cell(self, x, y):
@@ -79,7 +75,8 @@ class _Grid:
     def inside(self, i, j):
         return 0 <= i < self.nx and 0 <= j < self.ny
 
-    def block_circle(self, cx, cy, r):
+    def block_circle(self, cx, cy, r, layer=None):
+        layers = (0, 1) if layer is None else (layer,)
         i0, j0 = self.cell(cx - r, cy - r)
         i1, j1 = self.cell(cx + r, cy + r)
         r2 = r * r
@@ -87,69 +84,90 @@ class _Grid:
             for i in range(max(0, i0), min(self.nx, i1 + 1)):
                 x, y = self.xy(i, j)
                 if (x - cx) ** 2 + (y - cy) ** 2 <= r2:
-                    self.blocked[self._idx(i, j)] = 1
+                    for L in layers:
+                        self.blk[L][self._i(i, j)] = 1
 
-    def block_segment(self, x1, y1, x2, y2, r):
+    def block_segment(self, x1, y1, x2, y2, r, layer):
         n = max(1, int(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 / (GRID / 2)))
         for k in range(n + 1):
             t = k / n
-            self.block_circle(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, r)
+            self.block_circle(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, r, layer)
 
     def route(self, src, dst):
-        """BFS from src to dst (mm). Returns simplified polyline or None."""
+        """Dijkstra over (i, j, layer). Returns [(x, y, layer), ...] or None.
+        A layer change at the same (i, j) marks a via."""
         si, sj = self.cell(*src)
         di, dj = self.cell(*dst)
         if not (self.inside(si, sj) and self.inside(di, dj)):
             return None
-        # endpoints are always free (they sit on their own pads)
-        self.blocked[self._idx(si, sj)] = 0
-        self.blocked[self._idx(di, dj)] = 0
-        start, goal = (si, sj), (di, dj)
-        prev = {start: None}
-        q = deque([start])
-        while q:
-            cur = q.popleft()
-            if cur == goal:
+        # endpoints sit on through-hole pads: free on both layers
+        for L in (0, 1):
+            self.blk[L][self._i(si, sj)] = 0
+            self.blk[L][self._i(di, dj)] = 0
+
+        dist = {}
+        prev = {}
+        pq = [(0, si, sj, 0), (0, si, sj, 1)]
+        for s in ((si, sj, 0), (si, sj, 1)):
+            dist[s] = 0
+            prev[s] = None
+        goal = None
+        while pq:
+            d, i, j, L = heapq.heappop(pq)
+            if d > dist.get((i, j, L), 1e18):
+                continue
+            if (i, j) == (di, dj):
+                goal = (i, j, L)
                 break
-            ci, cj = cur
-            for ni, nj in ((ci + 1, cj), (ci - 1, cj), (ci, cj + 1), (ci, cj - 1)):
-                if not self.inside(ni, nj) or (ni, nj) in prev:
+            # in-plane
+            for ni, nj in ((i+1, j), (i-1, j), (i, j+1), (i, j-1)):
+                if not self.inside(ni, nj) or self.blk[L][self._i(ni, nj)]:
                     continue
-                if self.blocked[self._idx(ni, nj)]:
-                    continue
-                prev[(ni, nj)] = cur
-                q.append((ni, nj))
-        if goal not in prev:
+                nd = d + 1
+                if nd < dist.get((ni, nj, L), 1e18):
+                    dist[(ni, nj, L)] = nd
+                    prev[(ni, nj, L)] = (i, j, L)
+                    heapq.heappush(pq, (nd, ni, nj, L))
+            # via to other layer
+            oL = 1 - L
+            if not self.blk[oL][self._i(i, j)]:
+                nd = d + VIA_COST
+                if nd < dist.get((i, j, oL), 1e18):
+                    dist[(i, j, oL)] = nd
+                    prev[(i, j, oL)] = (i, j, L)
+                    heapq.heappush(pq, (nd, i, j, oL))
+        if goal is None:
             return None
-        # reconstruct + simplify collinear runs
-        cells = []
+        path = []
         c = goal
         while c is not None:
-            cells.append(c)
+            path.append(c)
             c = prev[c]
-        cells.reverse()
-        pts = [self.xy(*c) for c in cells]
-        pts[0], pts[-1] = src, dst  # snap to exact pad centres
+        path.reverse()
+        pts = [(*self.xy(i, j), L) for (i, j, L) in path]
+        pts[0] = (src[0], src[1], pts[0][2])
+        pts[-1] = (dst[0], dst[1], pts[-1][2])
         return _simplify(pts)
 
 
 def _simplify(pts):
+    """Drop collinear interior points that stay on the same layer."""
     if len(pts) <= 2:
         return pts
     out = [pts[0]]
-    for i in range(1, len(pts) - 1):
-        ax, ay = out[-1]
-        bx, by = pts[i]
-        cx, cy = pts[i + 1]
-        # drop b if a-b-c are collinear (cross product ~0)
-        if abs((bx - ax) * (cy - ay) - (by - ay) * (cx - ax)) > 1e-6:
-            out.append(pts[i])
+    for k in range(1, len(pts) - 1):
+        ax, ay, aL = out[-1]
+        bx, by, bL = pts[k]
+        cx, cy, cL = pts[k + 1]
+        if aL == bL == cL and abs((bx-ax)*(cy-ay) - (by-ay)*(cx-ax)) < 1e-6:
+            continue
+        out.append(pts[k])
     out.append(pts[-1])
     return out
 
 
 # --------------------------------------------------------------------------- #
-# board construction
+# footprints
 # --------------------------------------------------------------------------- #
 def _load_footprint(fp_id: str):
     lib, _, name = fp_id.partition(":")
@@ -160,20 +178,14 @@ def _load_footprint(fp_id: str):
 
 
 def _strip_footprint_graphics(fp):
-    """Move footprint-owned Edge.Cuts (panel-mount slots) and silkscreen
-    graphics onto a non-fab layer, so they neither corrupt the board outline
-    nor overhang a narrow board.
-
-    We re-layer rather than Remove(): Remove() corrupts the global footprint
-    plugin state and breaks the next FootprintLoad().
-    """
+    """Re-layer footprint Edge.Cuts/silk to Dwgs.User (Remove() corrupts the
+    footprint plugin state and breaks the next FootprintLoad)."""
     for g in fp.GraphicalItems():
         if g.GetLayer() in (pcbnew.Edge_Cuts, pcbnew.F_SilkS, pcbnew.B_SilkS):
             g.SetLayer(pcbnew.Dwgs_User)
 
 
 def _copper_bbox(board):
-    """Bounding box (mm) of all pads -- what the outline must clear."""
     x0 = y0 = 1e18
     x1 = y1 = -1e18
     for fp in board.GetFootprints():
@@ -198,33 +210,66 @@ def _draw_outline(board, x0, y0, x1, y1):
         board.Add(seg)
 
 
-def _add_gnd_zone(board, net, x0, y0, x1, y1):
-    inset = EDGE_CLEAR
-    zone = pcbnew.ZONE(board)
-    zone.SetLayer(pcbnew.B_Cu)
-    zone.SetNetCode(net.GetNetCode())
-    zone.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
-    # a fresh NewBoard() has zero default clearances, so the filler would pour
-    # right up to mounting holes -- force a clearance above the DRC rule.
-    zone.SetLocalClearance(_mm(CLEARANCE + 0.05))
-    pts = pcbnew.VECTOR_VECTOR2I()
-    for (x, y) in [(x0 + inset, y0 + inset), (x1 - inset, y0 + inset),
-                   (x1 - inset, y1 - inset), (x0 + inset, y1 - inset)]:
-        pts.append(_vec(x, y))
-    zone.AddPolygon(pts)
-    board.Add(zone)
-    return zone
+# --------------------------------------------------------------------------- #
+# copper pour + NPTH keepouts
+# --------------------------------------------------------------------------- #
+def _poly(board, pts):
+    v = pcbnew.VECTOR_VECTOR2I()
+    for (x, y) in pts:
+        v.append(_vec(x, y))
+    return v
 
 
-def _obstacles(board, keep_netcode):
-    """(cx, cy, r) circles for every pad not on keep_netcode, plus all NPTH."""
-    obs = []
-    # pad edge + copper clearance + our own track half-width + a grid-snap margin
-    inflate = CLEARANCE + TRACK_WIDTH / 2 + GRID
+def _add_pour(board, net, layer, x0, y0, x1, y1):
+    z = pcbnew.ZONE(board)
+    z.SetLayer(layer)
+    z.SetNetCode(net.GetNetCode())
+    z.SetLocalClearance(_mm(CLEARANCE + 0.05))
+    z.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
+    i = EDGE_CLEAR
+    z.AddPolygon(_poly(board, [(x0+i, y0+i), (x1-i, y0+i),
+                               (x1-i, y1-i), (x0+i, y1-i)]))
+    board.Add(z)
+
+
+def _add_npth_keepouts(board):
+    """Circular no-pour rule-areas around mounting holes; the zone filler
+    won't clear bare NPTH holes by itself."""
+    import math
+    ls = pcbnew.LSET()
+    ls.AddLayer(pcbnew.F_Cu)
+    ls.AddLayer(pcbnew.B_Cu)
     for fp in board.GetFootprints():
         for pad in fp.Pads():
-            is_npth = pad.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH
-            if not is_npth and pad.GetNetCode() == keep_netcode:
+            if pad.GetAttribute() != pcbnew.PAD_ATTRIB_NPTH:
+                continue
+            cx, cy = _pos_mm(pad)
+            r = pcbnew.ToMM(pad.GetDrillSizeX()) / 2 + CLEARANCE + 0.1
+            ka = pcbnew.ZONE(board)
+            ka.SetIsRuleArea(True)
+            ka.SetDoNotAllowCopperPour(True)   # block the pour only...
+            ka.SetDoNotAllowTracks(False)      # ...not the pads/tracks/vias
+            ka.SetDoNotAllowVias(False)
+            ka.SetDoNotAllowPads(False)
+            ka.SetDoNotAllowFootprints(False)
+            ka.SetLayerSet(ls)
+            pts = [(cx + r*math.cos(a), cy + r*math.sin(a))
+                   for a in [i*math.pi/8 for i in range(16)]]
+            ka.AddPolygon(_poly(board, pts))
+            board.Add(ka)
+
+
+# --------------------------------------------------------------------------- #
+# net routing
+# --------------------------------------------------------------------------- #
+def _obstacle_circles(board, keep_netcode):
+    """Pads not on keep_netcode (+ all NPTH) as (cx, cy, r)."""
+    obs = []
+    inflate = CLEARANCE + TRACK_WIDTH / 2 + 0.15
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            npth = pad.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH
+            if not npth and pad.GetNetCode() == keep_netcode:
                 continue
             bb = pad.GetBoundingBox()
             r = max(pcbnew.ToMM(bb.GetWidth()), pcbnew.ToMM(bb.GetHeight())) / 2
@@ -233,84 +278,98 @@ def _obstacles(board, keep_netcode):
     return obs
 
 
-def _route_all(board, mod, x0, y0, x1, y1):
-    """Maze-route every net on F.Cu. Returns nets that failed.
+def _route_signals(board, mod, x0, y0, x1, y1):
+    """Route every non-GND net on 2 layers with vias. Returns failed nets."""
+    gx0 = x0 + EDGE_CLEAR + TRACK_WIDTH / 2
+    gy0 = y0 + EDGE_CLEAR + TRACK_WIDTH / 2
+    gx1 = x1 - EDGE_CLEAR - TRACK_WIDTH / 2
+    gy1 = y1 - EDGE_CLEAR - TRACK_WIDTH / 2
 
-    GND is routed last so it threads around the already-laid signal tracks
-    rather than the other way round.
-    """
+    tracks = []   # (netcode, layer, x1, y1, x2, y2)
+    vias = []     # (netcode, x, y)
     failed = []
-    # grid bounds inset so copper stays clear of the edge
-    gx0, gy0 = x0 + EDGE_CLEAR + TRACK_WIDTH / 2, y0 + EDGE_CLEAR + TRACK_WIDTH / 2
-    gx1, gy1 = x1 - EDGE_CLEAR - TRACK_WIDTH / 2, y1 - EDGE_CLEAR - TRACK_WIDTH / 2
+    # route higher-fanout nets first -- they're hardest to fit and otherwise
+    # get boxed in by the easy two-pin nets
+    nets = [n for n in mod.nets if n.name != GND_NET]
+    nets.sort(key=lambda n: -len(n.pins))
 
-    nets = sorted(mod.nets, key=lambda n: n.name == GND_NET)
-    routed_segments = []  # (x1,y1,x2,y2) of already-laid tracks (other nets)
     for net in nets:
         ni = board.FindNet(net.name)
+        nc = ni.GetNetCode()
         grid = _Grid(gx0, gy0, gx1, gy1)
-        for (cx, cy, r) in _obstacles(board, ni.GetNetCode()):
+        for (cx, cy, r) in _obstacle_circles(board, nc):
             grid.block_circle(cx, cy, r)
-        for (ax, ay, bx, by) in routed_segments:
-            # other track half-width + clearance + our half-width + grid margin
-            grid.block_segment(ax, ay, bx, by,
-                               TRACK_WIDTH + CLEARANCE + GRID)
+        for (t_nc, L, ax, ay, bx, by) in tracks:
+            if t_nc != nc:
+                grid.block_segment(ax, ay, bx, by,
+                                   TRACK_WIDTH + CLEARANCE + 0.15, L)
+        for (v_nc, vx, vy) in vias:
+            if v_nc != nc:
+                grid.block_circle(vx, vy, VIA_DIA / 2 + CLEARANCE + 0.15)
 
         pads = [board.FindFootprintByReference(p.ref)
                 .FindPadByNumber(mod.pad_number(p)) for p in net.pins]
-        anchor = pads[0]
-        ax, ay = _pos_mm(anchor)
+        anchor = _pos_mm(pads[0])
+        ok = True
         for pad in pads[1:]:
-            bx, by = _pos_mm(pad)
-            path = grid.route((ax, ay), (bx, by))
+            path = grid.route(anchor, _pos_mm(pad))
             if path is None:
-                failed.append(net.name)
-                continue
+                ok = False
+                break
             for k in range(len(path) - 1):
-                (sx, sy), (ex, ey) = path[k], path[k + 1]
-                trk = pcbnew.PCB_TRACK(board)
-                trk.SetStart(_vec(sx, sy))
-                trk.SetEnd(_vec(ex, ey))
-                trk.SetWidth(_mm(TRACK_WIDTH))
-                trk.SetLayer(pcbnew.F_Cu)
-                trk.SetNet(ni)
-                board.Add(trk)
-                routed_segments.append((sx, sy, ex, ey))
+                ax, ay, aL = path[k]
+                bx, by, bL = path[k + 1]
+                if aL != bL:                      # via
+                    via = pcbnew.PCB_VIA(board)
+                    via.SetViaType(pcbnew.VIATYPE_THROUGH)
+                    via.SetPosition(_vec(ax, ay))
+                    via.SetDrill(_mm(VIA_DRILL))
+                    via.SetWidth(_mm(VIA_DIA))
+                    via.SetNet(ni)
+                    board.Add(via)
+                    vias.append((nc, ax, ay))
+                    grid.block_circle(ax, ay, VIA_DIA/2 + CLEARANCE + 0.15)
+                else:                              # track
+                    trk = pcbnew.PCB_TRACK(board)
+                    trk.SetStart(_vec(ax, ay))
+                    trk.SetEnd(_vec(bx, by))
+                    trk.SetWidth(_mm(TRACK_WIDTH))
+                    trk.SetLayer(LAYERS[aL])
+                    trk.SetNet(ni)
+                    board.Add(trk)
+                    tracks.append((nc, aL, ax, ay, bx, by))
+                    grid.block_segment(ax, ay, bx, by,
+                                       TRACK_WIDTH + CLEARANCE + 0.15, aL)
+        if not ok:
+            failed.append(net.name)
     return failed
 
 
 def build_board(mod: Module, out_path: Path) -> Path:
     board = pcbnew.NewBoard(str(out_path))
+    ds = board.GetDesignSettings()
+    ds.m_CopperEdgeClearance = _mm(EDGE_CLEAR)
+    ds.m_HoleClearance = _mm(CLEARANCE + 0.05)
+    ds.m_MinClearance = _mm(CLEARANCE)
 
-    # design rules to match what we route to
-    # a fresh NewBoard() has zero clearances, so the zone filler would pour up
-    # to holes/edges; set them above the DRC rules we check against.
-    settings = board.GetDesignSettings()
-    settings.m_CopperEdgeClearance = _mm(EDGE_CLEAR)
-    settings.m_HoleClearance = _mm(CLEARANCE + 0.05)
-    settings.m_MinClearance = _mm(CLEARANCE)
-
-    # nets
     nets = {}
     for net in mod.nets:
         ni = pcbnew.NETINFO_ITEM(board, net.name)
         board.Add(ni)
         nets[net.name] = ni
 
-    # footprints
     for c in mod.components:
         fp = _load_footprint(c.part.footprint)
         fp.SetReference(c.ref)
         fp.SetValue(c.value or c.type)
-        # mutate before Add (the board takes ownership) and hide fields before
-        # Remove()-ing graphics (Remove() unwraps later SWIG accessors).
-        for field in fp.GetFields():  # panel carries the labelling
+        for field in fp.GetFields():
             field.SetVisible(False)
         _strip_footprint_graphics(fp)
         board.Add(fp)
         fp.SetPosition(_vec(c.x, c.y))
+        if c.rotation:
+            fp.SetOrientationDegrees(c.rotation)
 
-    # pad -> net
     for net in mod.nets:
         ni = nets[net.name]
         for pin in net.pins:
@@ -320,18 +379,22 @@ def build_board(mod: Module, out_path: Path) -> Path:
                 raise RuntimeError(f"{pin}: no pad {mod.pad_number(pin)!r}")
             pad.SetNet(ni)
 
-    # outline sized to copper + margin
     cx0, cy0, cx1, cy1 = _copper_bbox(board)
     x0, y0 = cx0 - BOARD_MARGIN, cy0 - BOARD_MARGIN
     x1, y1 = cx1 + BOARD_MARGIN, cy1 + BOARD_MARGIN
     _draw_outline(board, x0, y0, x1, y1)
 
-    # route every net (GND included) on F.Cu
-    failed = _route_all(board, mod, x0, y0, x1, y1)
+    failed = _route_signals(board, mod, x0, y0, x1, y1)
     if failed:
         raise RuntimeError(f"router failed to connect nets: {failed}")
 
-    # silkscreen title
+    # GND as two poured planes; keepouts clear the mounting holes
+    if GND_NET in nets:
+        _add_npth_keepouts(board)
+        _add_pour(board, nets[GND_NET], pcbnew.F_Cu, x0, y0, x1, y1)
+        _add_pour(board, nets[GND_NET], pcbnew.B_Cu, x0, y0, x1, y1)
+        pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+
     text = pcbnew.PCB_TEXT(board)
     text.SetText(mod.title)
     text.SetPosition(_vec((x0 + x1) / 2, y0 + 1.5))
@@ -399,14 +462,11 @@ def generate(mod: Module, out_dir: Path) -> dict:
     out_dir = Path(out_dir)
     board_path = out_dir / f"{mod.name}.kicad_pcb"
     build_board(mod, board_path)
-
     drc = run_drc(board_path, out_dir / "drc.json")
     if not drc.clean:
         raise RuntimeError(
             f"DRC failed: {drc.errors} error(s) {dict(drc.by_type)} "
-            f"-- see {drc.report}"
-        )
-
+            f"-- see {drc.report}")
     artifacts = export_fab(board_path, out_dir)
     artifacts["board"] = board_path
     artifacts["drc"] = drc

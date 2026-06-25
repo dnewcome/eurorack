@@ -61,7 +61,7 @@ PARTS: dict[str, Part] = {
     # --- discrete passives (board-only) ---
     "resistor": Part(
         type="resistor",
-        footprint="Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal",
+        footprint="Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P2.54mm_Vertical",
         pins={"1": "1", "2": "2", "A": "1", "B": "2"},
         panel_d=0.0,
         sim="resistor",
